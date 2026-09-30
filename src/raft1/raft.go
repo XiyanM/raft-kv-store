@@ -20,18 +20,43 @@ import (
 	"6.5840/tester1"
 )
 
+type LogEntry struct {
+	Term    int
+	Command interface{}
+}
+
+const (
+	Follower = "follower"
+	Candidate = "candidate"
+	Leader = "leader"
+)
 
 // A Go object implementing a single Raft peer.
 type Raft struct {
-	mu        sync.Mutex          // Lock to protect shared access to this peer's state
-	peers     []*labrpc.ClientEnd // RPC end points of all peers
-	persister *tester.Persister   // Object to hold this peer's persisted state
-	me        int                 // this peer's index into peers[]
+	mu        sync.Mutex
+	peers     []*labrpc.ClientEnd
+	persister *tester.Persister
+	me        int
+	applyCh   chan raftapi.ApplyMsg 
 
-	// Your data here (3A, 3B, 3C).
-	// Look at the paper's Figure 2 for a description of what
-	// state a Raft server must maintain.
+	// Persistent state 
+	currentTerm int
+	votedFor    int
+	log         []LogEntry
 
+	// Volatile state, all servers
+	commitIndex int
+	lastApplied int
+	state       string
+	electionDeadline time.Time // when the current election timeout expires
+
+	// Volatile state, leader only 
+	nextIndex  []int
+	matchIndex []int
+
+	// Persistent, snapshot
+	lastIncludedIndex int
+	lastIncludedTerm  int
 }
 
 // return currentTerm and whether this server
@@ -204,13 +229,24 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.me = me
 
 	// Your initialization code here (3A, 3B, 3C).
+	rf.currentTerm = 0
+	rf.votedFor = -1
+	rf.log = make([]LogEntry, 0)
+	rf.commitIndex = 0
+	rf.lastApplied = 0
+	rf.state = Follower
+	rf.electionDeadline = time.Now()
+
+	rf.nextIndex = make([]int, len(peers))
+	rf.matchIndex = make([]int, len(peers))
+
+	rf.applyCh = applyCh
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
 	// start ticker goroutine to start elections
 	go rf.ticker()
-
 
 	return rf
 }

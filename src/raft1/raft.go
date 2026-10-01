@@ -31,18 +31,6 @@ const (
 	Leader = "leader"
 )
 
-type RequestVoteArgs struct {
-	Term         int
-	CandidateId  int
-	LastLogIndex int
-	LastLogTerm  int
-}
-
-type RequestVoteReply struct {
-	Term        int
-	VoteGranted bool
-}
-
 // A Go object implementing a single Raft peer.
 type Raft struct {
 	mu        sync.Mutex
@@ -137,22 +125,66 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 
 }
 
+func (rf *Raft) lastLogIndexAndTerm() (int, int) {
+	if len(rf.log) == 0{
+		return 0, 0
+	}
+
+	return len(rf.log), rf.log[len(rf.log)-1].Term
+}
+
+func randomElectionTimeout() (time.Duration) {
+	return time.Duration(300 + (rand.Int63() % 300)) * time.Millisecond
+}
 
 // example RequestVote RPC arguments structure.
 // field names must start with capital letters!
 type RequestVoteArgs struct {
-	// Your data here (3A, 3B).
+	CandidateId int
+	Term int
+	LastLogIndex int
+	LastLogTerm int
 }
 
 // example RequestVote RPC reply structure.
 // field names must start with capital letters!
 type RequestVoteReply struct {
-	// Your data here (3A).
+	VoteGranted bool
+	Term int
 }
 
 // example RequestVote RPC handler.
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (3A, 3B).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	if rf.currentTerm > args.Term{
+		reply.VoteGranted = false
+		reply.Term = rf.currentTerm
+		return
+	}
+
+	if args.Term > rf.currentTerm{
+		rf.currentTerm = args.Term
+		rf.votedFor = -1
+		rf.state = Follower
+		rf.persist()
+	}
+
+	reply.Term = rf.currentTerm
+	lastLogIndex, lastLogTerm := rf.lastLogIndexAndTerm()
+	logUpToDate := args.LastLogTerm > lastLogTerm || 
+	(args.LastLogTerm == lastLogTerm && args.LastLogIndex >= lastLogIndex)
+
+	if (rf.votedFor == -1 || rf.votedFor == args.CandidateId) && logUpToDate{
+		reply.VoteGranted = true
+		rf.votedFor = args.CandidateId
+		rf.persist()
+		rf.electionDeadline = time.Now().Add(randomElectionTimeout())
+	} else{
+		reply.VoteGranted = false
+	}
 }
 
 // example code to send a RequestVote RPC to a server.

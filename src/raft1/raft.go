@@ -153,6 +153,22 @@ type RequestVoteReply struct {
 	Term int
 }
 
+type AppendEntriesArgs struct {
+	LeaderId int
+	Term int
+	PrevLogIndex int
+	PrevLogTerm int
+	Entries []LogEntry
+	LeaderCommit int
+}
+
+type AppendEntriesReply struct {
+	Term int
+	Success bool
+	ConflictIndex int
+	ConflictTerm int
+}
+
 // example RequestVote RPC handler.
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (3A, 3B).
@@ -187,6 +203,75 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	}
 }
 
+// AppendEntries RPC handler
+func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply){
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	// if my term is greater than theirs return false and update their term
+	if args.Term < rf.currentTerm{
+		reply.Term = rf.currentTerm
+		reply.Success = false
+		return
+	}
+
+	// if their term is greater than mine update my term
+	if args.Term > rf.currentTerm{
+		rf.currentTerm = args.Term
+		rf.votedFor = -1
+		rf.persist()
+	}
+	// reset election deadline and revert to follower upon receiving a valid AppendEntries
+	rf.state = Follower
+	rf.electionDeadline = time.Now().Add(randomElectionTimeout())
+	reply.Term = rf.currentTerm
+	lastLogIndex, _ := rf.lastLogIndexAndTerm()
+
+	if args.PrevLogIndex > lastLogIndex {
+		reply.Success = false
+		reply.ConflictIndex = lastLogIndex+1
+		reply.ConflictTerm = 0
+		return
+	}
+
+	// if the term at the specified index has a different term, obtain the first index of that term
+	if args.PrevLogIndex > 0{
+		prevEntryTerm := rf.log[args.PrevLogIndex-1].Term
+		if prevEntryTerm != args.PrevLogTerm {
+			reply.Success = false
+			reply.ConflictTerm = prevEntryTerm
+			firstIndexOfTerm := args.PrevLogIndex
+			for firstIndexOfTerm > 1 && rf.log[firstIndexOfTerm-2].Term == prevEntryTerm{
+				firstIndexOfTerm--
+			}
+			reply.ConflictIndex = firstIndexOfTerm
+			return
+		}
+	}
+	// if index we are trying to write to already has an entry whose term is less than ours, truncate and append. 
+	// otherwise append normally
+	for i, entry := range args.Entries {
+		entryIndex := args.PrevLogIndex + 1 + i
+		if entryIndex <= lastLogIndex {
+			if rf.log[entryIndex-1].Term != entry.Term {
+				rf.log = rf.log[:entryIndex-1]
+				rf.log = append(rf.log, args.Entries[i:]...)
+				break
+			} 
+		} else {
+			rf.log = append(rf.log, args.Entries[i:]...)
+			break
+		}
+	}
+	rf.persist()
+
+	if args.LeaderCommit > rf.commitIndex {
+		newLastIndex, _ := rf.lastLogIndexAndTerm()
+		rf.commitIndex = min(args.LeaderCommit, newLastIndex)
+	}
+	
+	reply.Success = true
+}
 // example code to send a RequestVote RPC to a server.
 // server is the index of the target server in rf.peers[].
 // expects RPC arguments in args.
@@ -219,6 +304,10 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	return ok
 }
 
+func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
+	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
+	return ok
+}
 
 // the service using Raft (e.g. a k/v server) wants to start
 // agreement on the next command to be appended to Raft's log. if this

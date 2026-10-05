@@ -66,6 +66,10 @@ func (rf *Raft) GetState() (int, bool) {
 	var term int
 	var isleader bool
 	// Your code here (3A).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	term = rf.currentTerm
+	isleader = rf.state == Leader
 	return term, isleader
 }
 
@@ -333,18 +337,79 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 
 func (rf *Raft) ticker() {
 	for true {
-
-		// Your code here (3A)
 		// Check if a leader election should be started.
-
-
-		// pause for a random amount of time between 50 and 350
-		// milliseconds.
-		ms := 50 + (rand.Int63() % 300)
-		time.Sleep(time.Duration(ms) * time.Millisecond)
+		rf.mu.Lock()
+		if rf.state != Leader && time.Now().After(rf.electionDeadline) {
+			rf.startElectionLocked()
+		}
+		rf.mu.Unlock()
+		// pause for 20 ms
+		time.Sleep(20 * time.Millisecond)
 	}
 }
 
+func (rf *Raft) becomeLeaderLocked() {
+	rf.state = Leader
+	lastLogIndex, _ := rf.lastLogIndexAndTerm()
+	for i := range rf.peers {
+		rf.nextIndex[i] = lastLogIndex + 1
+		rf.matchIndex[i] = 0
+	}
+	go rf.heartbeatLoop(rf.currentTerm)
+}
+
+func (rf *Raft) startElectionLocked() {
+	rf.state = Candidate
+	rf.votedFor = rf.me
+	rf.currentTerm++
+	rf.electionDeadline = time.Now().Add(randomElectionTimeout())
+	rf.persist()
+
+	term := rf.currentTerm
+	lastLogIndex, lastLogTerm := rf.lastLogIndexAndTerm()
+	votes := 1
+
+	for peer := range rf.peers {
+		if peer == rf.me {
+			continue
+		}
+		go func(peer int) {
+			args := &RequestVoteArgs{
+				Term: term,
+				CandidateId: rf.me,
+				LastLogIndex: lastLogIndex,
+				LastLogTerm: lastLogTerm,
+			}
+			reply := &RequestVoteReply{}
+			if !rf.sendRequestVote(peer, args, reply) {
+				return
+			}
+
+			rf.mu.Lock()
+			defer rf.mu.Unlock()
+
+			if reply.Term > rf.currentTerm {
+				rf.state = Follower
+				rf.votedFor = -1
+				rf.currentTerm = reply.Term
+				rf.persist()
+				return
+			}
+
+			if rf.state != Candidate || rf.currentTerm != term {
+				return
+			}
+
+			if reply.VoteGranted{
+				votes++
+				if votes > len(rf.peers)/2{
+					rf.becomeLeaderLocked()
+				}
+			}
+
+		}(peer)
+	}
+}
 // the service or tester wants to create a Raft server. the ports
 // of all the Raft servers (including this one) are in peers[]. this
 // server's port is peers[me]. all the servers' peers[] arrays

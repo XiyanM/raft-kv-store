@@ -358,6 +358,26 @@ func (rf *Raft) becomeLeaderLocked() {
 	go rf.heartbeatLoop(rf.currentTerm)
 }
 
+func (rf *Raft) heartbeatLoop(term int) {
+	for true {
+		rf.mu.Lock()
+		if rf.state != Leader || rf.currentTerm != term {
+			rf.mu.Unlock()
+			return
+		}
+		for peer := range rf.peers {
+			if peer == rf.me {
+				continue
+			} 
+			go rf.replicateTo(peer, term)
+			}
+			rf.mu.Unlock()
+
+			time.Sleep(100*time.Millisecond)
+		}
+	}
+
+
 func (rf *Raft) startElectionLocked() {
 	rf.state = Candidate
 	rf.votedFor = rf.me
@@ -409,6 +429,92 @@ func (rf *Raft) startElectionLocked() {
 
 		}(peer)
 	}
+}
+
+func (rf *Raft) replicateTo(peer int, term int) {
+	rf.mu.Lock()
+	if rf.currentTerm != term || rf.state != Leader {
+		rf.mu.Unlock()
+		return
+	}
+
+	prevLogIndex := rf.nextIndex[peer] - 1
+	prevLogTerm := 0
+	if prevLogIndex > 0 {
+		prevLogTerm = rf.log[prevLogIndex-1].Term
+	}
+
+	entries := make([]LogEntry, len(rf.log) - prevLogIndex)
+	copy(entries, rf.log[prevLogIndex:])
+	args := &AppendEntriesArgs{
+		Term: term,
+		LeaderId: rf.me,
+		PrevLogIndex: prevLogIndex,
+		PrevLogTerm: prevLogTerm,
+		Entries: entries,
+		LeaderCommit: rf.commitIndex,
+	}
+	rf.mu.Unlock()
+
+	reply := &AppendEntriesReply{}
+
+	if !rf.sendAppendEntries(peer, args, reply) {
+		return
+	}
+
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	if reply.Term > rf.currentTerm {
+		rf.currentTerm = reply.Term
+		rf.votedFor = -1
+		rf.state = Follower
+		rf.persist()
+		return
+	}
+	if rf.state != Leader || rf.currentTerm != term {
+		return
+	}
+
+	if reply.Success {
+		newMatch := args.PrevLogIndex + len(args.Entries)
+		if newMatch > rf.matchIndex[peer] {
+			rf.matchIndex[peer] = newMatch
+		}
+		rf.nextIndex[peer] = rf.matchIndex[peer] + 1
+		return
+	}
+
+	// failure: ignore if nextIndex already moved since we built this request
+	if rf.nextIndex[peer] != args.PrevLogIndex+1 {
+		return
+	}
+	if reply.ConflictTerm == 0 {
+		// follower's log is too short
+		rf.nextIndex[peer] = reply.ConflictIndex
+	} else {
+		// does our own log contain the conflicting term?
+		lastIdx := 0
+		for i := len(rf.log); i >= 1; i-- {
+			t := rf.log[i-1].Term
+			if t == reply.ConflictTerm {
+				lastIdx = i
+				break
+			}
+			if t < reply.ConflictTerm {
+				break
+			}
+		}
+		if lastIdx > 0 {
+			rf.nextIndex[peer] = lastIdx + 1
+		} else {
+			rf.nextIndex[peer] = reply.ConflictIndex
+		}
+	}
+	if rf.nextIndex[peer] < 1 {
+		rf.nextIndex[peer] = 1
+	}
+
 }
 // the service or tester wants to create a Raft server. the ports
 // of all the Raft servers (including this one) are in peers[]. this

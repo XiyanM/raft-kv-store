@@ -330,6 +330,25 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	isLeader := true
 
 	// Your code here (3B).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	if rf.state != Leader {
+		return index, term, false
+	}
+
+	rf.log = append(rf.log, LogEntry{Term: rf.currentTerm, Command: command})
+	rf.persist()
+
+	index = len(rf.log)
+	term = rf.currentTerm
+
+	for peer:= range rf.peers {
+		if peer == rf.me {
+			continue
+		}
+		go rf.replicateTo(peer, term)
+	}
 
 
 	return index, term, isLeader

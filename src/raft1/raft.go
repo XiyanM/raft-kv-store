@@ -450,6 +450,25 @@ func (rf *Raft) startElectionLocked() {
 	}
 }
 
+func (rf *Raft) advanceCommitIndexLocked() {
+	lastIndex, _ := rf.lastLogIndexAndTerm()
+	
+	for n:= lastIndex; n > rf.commitIndex; n-- {
+		if rf.log[n-1].Term != rf.currentTerm {
+			break
+		}
+		count:=1
+		for peer := range rf.peers {
+			if peer != rf.me && rf.matchIndex[peer] >= n {
+				count++
+			}
+		}
+		if count > len(rf.peers) / 2 {
+			rf.commitIndex = n
+			break
+		}
+	}
+}
 func (rf *Raft) replicateTo(peer int, term int) {
 	rf.mu.Lock()
 	if rf.currentTerm != term || rf.state != Leader {
@@ -501,6 +520,7 @@ func (rf *Raft) replicateTo(peer int, term int) {
 			rf.matchIndex[peer] = newMatch
 		}
 		rf.nextIndex[peer] = rf.matchIndex[peer] + 1
+		rf.advanceCommitIndexLocked()
 		return
 	}
 

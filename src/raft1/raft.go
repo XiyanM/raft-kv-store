@@ -555,6 +555,28 @@ func (rf *Raft) replicateTo(peer int, term int) {
 	}
 
 }
+
+func (rf *Raft) applier() {
+	for true {
+		rf.mu.Lock()
+		var msgs []raftapi.ApplyMsg
+		for rf.lastApplied < rf.commitIndex {
+			rf.lastApplied++
+			msgs = append(msgs, raftapi.ApplyMsg{
+				CommandValid: true,
+				Command: rf.log[rf.lastApplied-1].Command,
+				CommandIndex: rf.lastApplied,
+			})
+		}
+		rf.mu.Unlock()
+
+		for _, msg := range msgs {
+			rf.applyCh <- msg
+		}
+
+		time.Sleep(10*time.Millisecond)
+	}
+}
 // the service or tester wants to create a Raft server. the ports
 // of all the Raft servers (including this one) are in peers[]. this
 // server's port is peers[me]. all the servers' peers[] arrays
@@ -590,6 +612,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// start ticker goroutine to start elections
 	go rf.ticker()
+	go rf.applier()
 
 	return rf
 }

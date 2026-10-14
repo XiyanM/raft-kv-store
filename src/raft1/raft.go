@@ -57,6 +57,7 @@ type Raft struct {
 	// Persistent, snapshot
 	lastIncludedIndex int
 	lastIncludedTerm  int
+	snapshotPending   bool
 }
 
 // return currentTerm and whether this server
@@ -134,11 +135,17 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 }
 
 func (rf *Raft) lastLogIndexAndTerm() (int, int) {
-	if len(rf.log) == 0{
-		return 0, 0
-	}
+	last := rf.lastIncludedIndex + len(rf.log)
+	return last, rf.termAt(last)
+}
 
-	return len(rf.log), rf.log[len(rf.log)-1].Term
+// caller must hold rf.mu
+// term of the entry at a Raft index in [lastIncludedIndex, last index]
+func (rf *Raft) termAt(index int) int {
+	if index == rf.lastIncludedIndex {
+		return rf.lastIncludedTerm
+	}
+	return rf.log[index-rf.lastIncludedIndex-1].Term
 }
 
 func randomElectionTimeout() (time.Duration) {

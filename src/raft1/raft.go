@@ -219,62 +219,72 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 }
 
 // AppendEntries RPC handler
-func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply){
+func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	// if my term is greater than theirs return false and update their term
-	if args.Term < rf.currentTerm{
+	if args.Term < rf.currentTerm {
 		reply.Term = rf.currentTerm
 		reply.Success = false
 		return
 	}
-
-	// if their term is greater than mine update my term
-	if args.Term > rf.currentTerm{
+	if args.Term > rf.currentTerm {
 		rf.currentTerm = args.Term
 		rf.votedFor = -1
 		rf.persist()
 	}
-	// reset election deadline and revert to follower upon receiving a valid AppendEntries
 	rf.state = Follower
 	rf.electionDeadline = time.Now().Add(randomElectionTimeout())
 	reply.Term = rf.currentTerm
+
+	prevLogIndex := args.PrevLogIndex
+	prevLogTerm := args.PrevLogTerm
+	entries := args.Entries
+
+	// the leader is probing below our snapshot: those entries are committed and
+	// already inside the snapshot, so skip past them
+	if prevLogIndex < rf.lastIncludedIndex {
+		skip := rf.lastIncludedIndex - prevLogIndex
+		if skip >= len(entries) {
+			reply.Success = true
+			return
+		}
+		entries = entries[skip:]
+		prevLogIndex = rf.lastIncludedIndex
+		prevLogTerm = rf.lastIncludedTerm
+	}
+
 	lastLogIndex, _ := rf.lastLogIndexAndTerm()
 
-	if args.PrevLogIndex > lastLogIndex {
+	if prevLogIndex > lastLogIndex {
 		reply.Success = false
-		reply.ConflictIndex = lastLogIndex+1
+		reply.ConflictIndex = lastLogIndex + 1
 		reply.ConflictTerm = 0
 		return
 	}
 
-	// if the term at the specified index has a different term, obtain the first index of that term
-	if args.PrevLogIndex > 0{
-		prevEntryTerm := rf.log[args.PrevLogIndex-1].Term
-		if prevEntryTerm != args.PrevLogTerm {
-			reply.Success = false
-			reply.ConflictTerm = prevEntryTerm
-			firstIndexOfTerm := args.PrevLogIndex
-			for firstIndexOfTerm > 1 && rf.log[firstIndexOfTerm-2].Term == prevEntryTerm{
-				firstIndexOfTerm--
-			}
-			reply.ConflictIndex = firstIndexOfTerm
-			return
+	prevEntryTerm := rf.termAt(prevLogIndex)
+	if prevEntryTerm != prevLogTerm {
+		reply.Success = false
+		reply.ConflictTerm = prevEntryTerm
+		firstIndexOfTerm := prevLogIndex
+		for firstIndexOfTerm > rf.lastIncludedIndex+1 && rf.termAt(firstIndexOfTerm-1) == prevEntryTerm {
+			firstIndexOfTerm--
 		}
+		reply.ConflictIndex = firstIndexOfTerm
+		return
 	}
-	// if index we are trying to write to already has an entry whose term is less than ours, truncate and append. 
-	// otherwise append normally
-	for i, entry := range args.Entries {
-		entryIndex := args.PrevLogIndex + 1 + i
+
+	for i, entry := range entries {
+		entryIndex := prevLogIndex + 1 + i
 		if entryIndex <= lastLogIndex {
-			if rf.log[entryIndex-1].Term != entry.Term {
-				rf.log = rf.log[:entryIndex-1]
-				rf.log = append(rf.log, args.Entries[i:]...)
+			if rf.termAt(entryIndex) != entry.Term {
+				rf.log = rf.log[:entryIndex-rf.lastIncludedIndex-1]
+				rf.log = append(rf.log, entries[i:]...)
 				break
-			} 
+			}
 		} else {
-			rf.log = append(rf.log, args.Entries[i:]...)
+			rf.log = append(rf.log, entries[i:]...)
 			break
 		}
 	}
@@ -284,7 +294,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		newLastIndex, _ := rf.lastLogIndexAndTerm()
 		rf.commitIndex = min(args.LeaderCommit, newLastIndex)
 	}
-	
+
 	reply.Success = true
 }
 // example code to send a RequestVote RPC to a server.
@@ -351,7 +361,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.log = append(rf.log, LogEntry{Term: rf.currentTerm, Command: command})
 	rf.persist()
 
-	index = len(rf.log)
+	index = rf.lastIncludedIndex + len(rf.log)	
 	term = rf.currentTerm
 
 	for peer:= range rf.peers {
@@ -465,7 +475,7 @@ func (rf *Raft) advanceCommitIndexLocked() {
 	lastIndex, _ := rf.lastLogIndexAndTerm()
 	
 	for n:= lastIndex; n > rf.commitIndex; n-- {
-		if rf.log[n-1].Term != rf.currentTerm {
+		if rf.termAt(n) != rf.currentTerm {
 			break
 		}
 		count:=1
@@ -488,13 +498,11 @@ func (rf *Raft) replicateTo(peer int, term int) {
 	}
 
 	prevLogIndex := rf.nextIndex[peer] - 1
-	prevLogTerm := 0
-	if prevLogIndex > 0 {
-		prevLogTerm = rf.log[prevLogIndex-1].Term
-	}
+	prevLogTerm := rf.termAt(prevLogIndex)
 
-	entries := make([]LogEntry, len(rf.log) - prevLogIndex)
-	copy(entries, rf.log[prevLogIndex:])
+	entries := make([]LogEntry, rf.lastIncludedIndex+len(rf.log)-prevLogIndex)
+	copy(entries, rf.log[prevLogIndex-rf.lastIncludedIndex:])
+
 	args := &AppendEntriesArgs{
 		Term: term,
 		LeaderId: rf.me,
@@ -545,8 +553,8 @@ func (rf *Raft) replicateTo(peer int, term int) {
 	} else {
 		// does our own log contain the conflicting term?
 		lastIdx := 0
-		for i := len(rf.log); i >= 1; i-- {
-			t := rf.log[i-1].Term
+		for i := rf.lastIncludedIndex + len(rf.log); i > rf.lastIncludedIndex; i-- {
+			t := rf.termAt(i)
 			if t == reply.ConflictTerm {
 				lastIdx = i
 				break
@@ -575,7 +583,7 @@ func (rf *Raft) applier() {
 			rf.lastApplied++
 			msgs = append(msgs, raftapi.ApplyMsg{
 				CommandValid: true,
-				Command: rf.log[rf.lastApplied-1].Command,
+				Command:      rf.log[rf.lastApplied-rf.lastIncludedIndex-1].Command,				
 				CommandIndex: rf.lastApplied,
 			})
 		}

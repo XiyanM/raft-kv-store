@@ -133,8 +133,17 @@ func (rf *Raft) PersistBytes() int {
 // service no longer needs the log through (and including)
 // that index. Raft should now trim its log as much as possible.
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
-	// Your code here (3D).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 
+	if index <= rf.lastIncludedIndex || index > rf.lastIncludedIndex+len(rf.log) {
+		return
+	}
+	term := rf.termAt(index) // must be read before the log is trimmed
+	rf.log = append([]LogEntry(nil), rf.log[index-rf.lastIncludedIndex:]...)
+	rf.lastIncludedIndex = index
+	rf.lastIncludedTerm = term
+	rf.persistWithSnapshot(snapshot)
 }
 
 func (rf *Raft) lastLogIndexAndTerm() (int, int) {

@@ -82,6 +82,10 @@ func (rf *Raft) GetState() (int, bool) {
 // after you've implemented snapshots, pass the current snapshot
 // (or nil if there's not yet a snapshot).
 func (rf *Raft) persist() {
+	rf.persistWithSnapshot(rf.persister.ReadSnapshot())
+}
+
+func (rf *Raft) persistWithSnapshot(snapshot []byte) {
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
 	e.Encode(rf.currentTerm)
@@ -89,8 +93,7 @@ func (rf *Raft) persist() {
 	e.Encode(rf.log)
 	e.Encode(rf.lastIncludedIndex)
 	e.Encode(rf.lastIncludedTerm)
-	raftstate := w.Bytes()
-	rf.persister.Save(raftstate, rf.persister.ReadSnapshot())
+	rf.persister.Save(w.Bytes(), snapshot)
 }
 
 

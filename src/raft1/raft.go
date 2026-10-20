@@ -118,6 +118,8 @@ func (rf *Raft) readPersist(data []byte) {
 	rf.log = log
 	rf.lastIncludedIndex = lastIncludedIndex
 	rf.lastIncludedTerm = lastIncludedTerm
+	rf.commitIndex = lastIncludedIndex
+	rf.lastApplied = lastIncludedIndex
 }
 
 // how many bytes in Raft's persisted log?
@@ -139,7 +141,7 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	if index <= rf.lastIncludedIndex || index > rf.lastIncludedIndex+len(rf.log) {
 		return
 	}
-	term := rf.termAt(index) // must be read before the log is trimmed
+	term := rf.termAt(index) 
 	rf.log = append([]LogEntry(nil), rf.log[index-rf.lastIncludedIndex:]...)
 	rf.lastIncludedIndex = index
 	rf.lastIncludedTerm = term
@@ -194,6 +196,18 @@ type AppendEntriesReply struct {
 	Success bool
 	ConflictIndex int
 	ConflictTerm int
+}
+
+type InstallSnapshotArgs struct {
+	Term              int
+	LeaderId          int
+	LastIncludedIndex int
+	LastIncludedTerm  int
+	Data              []byte
+}
+
+type InstallSnapshotReply struct {
+	Term int
 }
 
 // example RequestVote RPC handler.
@@ -309,6 +323,50 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	reply.Success = true
 }
+
+func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	if rf.currentTerm > args.Term {
+		reply.Term = rf.currentTerm
+		return
+	}
+
+	if args.Term > rf.currentTerm {
+		rf.votedFor = -1
+		rf.currentTerm = args.Term
+		rf.persist()
+	}
+
+	rf.state = Follower
+	rf.electionDeadline =  time.Now().Add(randomElectionTimeout())
+	reply.Term = rf.currentTerm
+
+	idx := args.LastIncludedIndex
+	if idx <= rf.lastIncludedIndex {
+		return
+	}
+
+	if idx <= rf.lastIncludedIndex + len(rf.log) && rf.termAt(idx) == args.LastIncludedTerm {
+		rf.log = append([]LogEntry(nil), rf.log[idx-rf.lastIncludedIndex:]...)
+	} else {
+		rf.log = make([]LogEntry, 0)
+	}
+
+	rf.lastIncludedIndex = idx
+	rf.lastIncludedTerm = args.LastIncludedTerm
+
+	if rf.commitIndex < idx {
+		rf.commitIndex = idx
+	}
+	if rf.lastApplied < idx {
+		rf.lastApplied = idx
+		rf.snapshotPending = true // the applier delivers it to the service, in order
+	}
+	rf.persistWithSnapshot(args.Data)
+	
+}
 // example code to send a RequestVote RPC to a server.
 // server is the index of the target server in rf.peers[].
 // expects RPC arguments in args.
@@ -343,6 +401,11 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
 	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
+	return ok
+}
+
+func (rf *Raft) sendInstallSnapshot (server int, args *InstallSnapshotArgs, reply *InstallSnapshotReply) bool {
+	ok := rf.peers[server].Call("Raft.InstallSnapshot", args, reply)
 	return ok
 }
 

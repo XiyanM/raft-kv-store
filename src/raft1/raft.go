@@ -698,6 +698,15 @@ func (rf *Raft) applier() {
 	for true {
 		rf.mu.Lock()
 		var msgs []raftapi.ApplyMsg
+		if rf.snapshotPending {
+			rf.snapshotPending = false
+			msgs = append(msgs, raftapi.ApplyMsg{
+				SnapshotValid: true,
+				Snapshot:      rf.persister.ReadSnapshot(),
+				SnapshotIndex: rf.lastIncludedIndex,
+				SnapshotTerm:  rf.lastIncludedTerm,
+			})
+		}
 		for rf.lastApplied < rf.commitIndex {
 			rf.lastApplied++
 			msgs = append(msgs, raftapi.ApplyMsg{

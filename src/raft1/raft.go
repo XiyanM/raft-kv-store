@@ -603,6 +603,19 @@ func (rf *Raft) replicateTo(peer int, term int) {
 		return
 	}
 
+	if rf.nextIndex[peer] <= rf.lastIncludedIndex {
+		args := &InstallSnapshotArgs{
+			Term: term,
+			LeaderId: rf.me,
+			LastIncludedIndex: rf.lastIncludedIndex,
+			LastIncludedTerm: rf.lastIncludedTerm,
+			Data: rf.persister.ReadSnapshot(),
+		}
+		rf.mu.Unlock()
+		rf.sendSnapshotTo(peer, term, args)
+		return
+	}
+
 	prevLogIndex := rf.nextIndex[peer] - 1
 	prevLogTerm := rf.termAt(prevLogIndex)
 

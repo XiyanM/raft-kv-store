@@ -367,6 +367,37 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	rf.persistWithSnapshot(args.Data)
 	
 }
+
+func (rf *Raft) sendSnapshotTo(peer int, term int, args *InstallSnapshotArgs) {
+	reply := &InstallSnapshotReply{}
+
+	if !rf.sendInstallSnapshot(peer, args, reply) {
+		return
+	}
+
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	if reply.Term > rf.currentTerm {
+		rf.currentTerm = reply.Term
+		rf.votedFor = -1
+		rf.state = Follower
+		rf.persist()
+		return
+	}
+
+	if rf.state != Leader || rf.currentTerm != term {
+		return
+	}
+
+	if args.LastIncludedIndex > rf.matchIndex[peer] {
+		rf.matchIndex[peer] = args.LastIncludedIndex
+	}
+
+	if args.LastIncludedIndex+1 > rf.nextIndex[peer] {
+		rf.nextIndex[peer] = args.LastIncludedIndex+1
+	}
+}
 // example code to send a RequestVote RPC to a server.
 // server is the index of the target server in rf.peers[].
 // expects RPC arguments in args.

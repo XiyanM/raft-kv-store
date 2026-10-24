@@ -12,12 +12,38 @@ import (
 )
 
 type Op struct {
-	// Your definitions here.
-	// Field names must start with capital letters,
-	// otherwise RPC will break.
+	Me  int
+	Id  int64
+	Req any
 }
 
+type result struct {
+	err rpc.Err
+	rep any
+}
 
+type waiter struct {
+	id      int64
+	term    int 
+	ch chan result
+}
+
+type StateMachine interface {
+	DoOp(any) any
+	Snapshot() []byte
+	Restore([]byte)
+}
+
+type RSM struct {
+	mu			    sync.Mutex
+	me 				int
+	rf 				raftapi.Raft
+	applyCh 		chan raftapi.ApplyMsg
+	maxraftstate 	int
+	sm 				StateMachine
+	persister 		*tester.Persister
+	waiters 		map[int]*waiter
+}
 // A server (i.e., ../server.go) that wants to replicate itself calls
 // MakeRSM and must implement the StateMachine interface.  This
 // interface allows the rsm package to interact with the server for
@@ -61,10 +87,20 @@ func MakeRSM(servers []*labrpc.ClientEnd, me int, persister *tester.Persister, m
 		maxraftstate: maxraftstate,
 		applyCh:      make(chan raftapi.ApplyMsg),
 		sm:           sm,
+		persister:    persister,
+		waiters:      make(map[int]*waiter),
 	}
+
+	// after a restart, load the saved snapshot before any command is applied
+	if snapshot := persister.ReadSnapshot(); len(snapshot) > 0 {
+		sm.Restore(snapshot)
+	}
+
 	if !tester.UseRaftStateMachine {
 		rsm.rf = raft.Make(servers, me, persister, rsm.applyCh)
 	}
+
+	go rsm.reader()
 	return rsm
 }
 

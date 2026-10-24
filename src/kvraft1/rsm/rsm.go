@@ -113,11 +113,90 @@ func (rsm *RSM) Raft() raftapi.Raft {
 // should return ErrWrongLeader if client should find new leader and
 // try again.
 func (rsm *RSM) Submit(req any) (rpc.Err, any) {
+	op := Op{Me: rsm.me, Id: rand.Int63(), Req: req}
 
-	// Submit creates an Op structure to run a command through Raft;
-	// for example: op := Op{Me: rsm.me, Id: id, Req: req}, where req
-	// is the argument to Submit and id is a unique id for the op.
+	// hold the lock across Start and the registration, so the reader
+	// can't deliver this index's result before the waiter exists
+	rsm.mu.Lock()
+	index, term, isLeader := rsm.rf.Start(op)
+	if !isLeader {
+		rsm.mu.Unlock()
+		return rpc.ErrWrongLeader, nil
+	}
+	// an older Submit still waiting on this index lost its op
+	if old, ok := rsm.waiters[index]; ok {
+		old.ch <- result{err: rpc.ErrWrongLeader}
+	}
+	w := &waiter{id: op.Id, term: term, ch: make(chan result, 1)}
+	rsm.waiters[index] = w
+	rsm.mu.Unlock()
 
-	// your code here
-	return rpc.ErrWrongLeader, nil // i'm dead, try another server.
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case res := <-w.ch:
+			return res.err, res.rep
+		case <-ticker.C:
+			curTerm, stillLeader := rsm.rf.GetState()
+			if curTerm == term && stillLeader {
+				continue
+			}
+			// leadership changed, give up on this index
+			rsm.mu.Lock()
+			if rsm.waiters[index] == w {
+				delete(rsm.waiters, index)
+			}
+			rsm.mu.Unlock()
+			select {
+			case res := <-w.ch: // the reader got there first
+				return res.err, res.rep
+			default:
+			}
+			return rpc.ErrWrongLeader, nil
+		}
+	}
 }
+
+func (rsm *RSM) reader() {
+	for msg := range rsm.applyCh {
+		if msg.CommandValid {
+			op, ok := msg.Command.(Op)
+			if !ok {
+				continue
+			}
+			rep := rsm.sm.DoOp(op.Req) // every server applies every committed op
+
+			rsm.mu.Lock()
+			if w, ok := rsm.waiters[msg.CommandIndex]; ok {
+				delete(rsm.waiters, msg.CommandIndex)
+				if w.id == op.Id {
+					w.ch <- result{err: rpc.OK, rep: rep}
+				} else {
+					// a different op committed at this index: ours was lost
+					w.ch <- result{err: rpc.ErrWrongLeader}
+				}
+			}
+			rsm.mu.Unlock()
+
+			// hand a snapshot to Raft when its saved state gets big
+			if rsm.maxraftstate != -1 && rsm.rf.PersistBytes() >= rsm.maxraftstate {
+				rsm.rf.Snapshot(msg.CommandIndex, rsm.sm.Snapshot())
+			}
+		} else if msg.SnapshotValid {
+			rsm.sm.Restore(msg.Snapshot)
+
+			// ops at or below the snapshot were applied without us seeing
+			// their results, so any Submit still waiting on them must retry
+			rsm.mu.Lock()
+			for index, w := range rsm.waiters {
+				if index <= msg.SnapshotIndex {
+					delete(rsm.waiters, index)
+					w.ch <- result{err: rpc.ErrWrongLeader}
+				}
+			}
+			rsm.mu.Unlock()
+		}
+	}
+}
+

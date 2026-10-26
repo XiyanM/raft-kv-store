@@ -1,18 +1,18 @@
 package rsm
 
 import (
+	"math/rand"
 	"sync"
+	"time"
 
 	"6.5840/kvsrv1/rpc"
 	"6.5840/labrpc"
 	"6.5840/raft1"
 	"6.5840/raftapi"
 	"6.5840/tester1"
-
 )
 
 type Op struct {
-	Me  int
 	Id  int64
 	Req any
 }
@@ -23,27 +23,20 @@ type result struct {
 }
 
 type waiter struct {
-	id      int64
-	term    int 
+	id int64
 	ch chan result
 }
 
-type StateMachine interface {
-	DoOp(any) any
-	Snapshot() []byte
-	Restore([]byte)
+type RSM struct {
+	mu           sync.Mutex
+	me           int
+	rf           raftapi.Raft
+	applyCh      chan raftapi.ApplyMsg
+	maxraftstate int
+	sm           StateMachine
+	waiters      map[int]*waiter
 }
 
-type RSM struct {
-	mu			    sync.Mutex
-	me 				int
-	rf 				raftapi.Raft
-	applyCh 		chan raftapi.ApplyMsg
-	maxraftstate 	int
-	sm 				StateMachine
-	persister 		*tester.Persister
-	waiters 		map[int]*waiter
-}
 // A server (i.e., ../server.go) that wants to replicate itself calls
 // MakeRSM and must implement the StateMachine interface.  This
 // interface allows the rsm package to interact with the server for
@@ -54,16 +47,6 @@ type StateMachine interface {
 	DoOp(any) any
 	Snapshot() []byte
 	Restore([]byte)
-}
-
-type RSM struct {
-	mu           sync.Mutex
-	me           int
-	rf           raftapi.Raft
-	applyCh      chan raftapi.ApplyMsg
-	maxraftstate int // snapshot if log grows this big
-	sm           StateMachine
-	// Your definitions here.
 }
 
 // servers[] contains the ports of the set of
@@ -87,7 +70,6 @@ func MakeRSM(servers []*labrpc.ClientEnd, me int, persister *tester.Persister, m
 		maxraftstate: maxraftstate,
 		applyCh:      make(chan raftapi.ApplyMsg),
 		sm:           sm,
-		persister:    persister,
 		waiters:      make(map[int]*waiter),
 	}
 
@@ -108,12 +90,11 @@ func (rsm *RSM) Raft() raftapi.Raft {
 	return rsm.rf
 }
 
-
 // Submit a command to Raft, and wait for it to be committed.  It
 // should return ErrWrongLeader if client should find new leader and
 // try again.
 func (rsm *RSM) Submit(req any) (rpc.Err, any) {
-	op := Op{Me: rsm.me, Id: rand.Int63(), Req: req}
+	op := Op{Id: rand.Int63(), Req: req}
 
 	// hold the lock across Start and the registration, so the reader
 	// can't deliver this index's result before the waiter exists
@@ -127,7 +108,7 @@ func (rsm *RSM) Submit(req any) (rpc.Err, any) {
 	if old, ok := rsm.waiters[index]; ok {
 		old.ch <- result{err: rpc.ErrWrongLeader}
 	}
-	w := &waiter{id: op.Id, term: term, ch: make(chan result, 1)}
+	w := &waiter{id: op.Id, ch: make(chan result, 1)}
 	rsm.waiters[index] = w
 	rsm.mu.Unlock()
 
@@ -199,4 +180,3 @@ func (rsm *RSM) reader() {
 		}
 	}
 }
-

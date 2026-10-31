@@ -1,2 +1,10 @@
 pkg/
 *-handin.tar.gz
+
+*.log
+logs/
+stress_status.txt
+stress_summary.txt
+src/main/raft1d
+src/main/rsm1d
+src/main/kvraft1d

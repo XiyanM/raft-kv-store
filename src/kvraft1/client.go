@@ -4,6 +4,8 @@ import (
 	"6.5840/kvsrv1/rpc"
 	"6.5840/kvtest1"
 	"6.5840/tester1"
+
+	"time"
 )
 
 
@@ -35,9 +37,19 @@ func (ck *Clerk) Leader() int {
 // must match the declared types of the RPC handler function's
 // arguments. Additionally, reply must be passed as a pointer.
 func (ck *Clerk) Get(key string) (string, rpc.Tversion, rpc.Err) {
-
-	// You will have to modify this function.
-	return "", 0, ""
+	args := rpc.GetArgs{Key: key}
+	i := ck.leader
+	for {
+		reply := rpc.GetReply{}
+		ok := ck.clnt.Call(ck.servers[i], "KVServer.Get", &args, &reply)
+		if ok && (reply.Err == rpc.OK || reply.Err == rpc.ErrNoKey) {
+			ck.leader = i
+			return reply.Value, reply.Version, reply.Err
+		}
+		// wrong leader, or the RPC was lost: try the next server
+		i = (i + 1) % len(ck.servers)
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 // Put updates key with value only if the version in the
@@ -58,6 +70,22 @@ func (ck *Clerk) Get(key string) (string, rpc.Tversion, rpc.Err) {
 // must match the declared types of the RPC handler function's
 // arguments. Additionally, reply must be passed as a pointer.
 func (ck *Clerk) Put(key string, value string, version rpc.Tversion) rpc.Err {
-	// You will have to modify this function.
-	return ""
+	args := rpc.PutArgs{Key: key, Value: value, Version: version}
+	i := ck.leader
+	retried := false
+	for {
+		reply := rpc.PutReply{}
+		ok := ck.clnt.Call(ck.servers[i], "KVServer.Put", &args, &reply)
+		if ok && reply.Err != rpc.ErrWrongLeader {
+			ck.leader = i
+			if reply.Err == rpc.ErrVersion && retried {
+				return rpc.ErrMaybe
+			}
+			return reply.Err
+		}
+		// a lost RPC or wrong leader: the earlier attempt may have been applied
+		retried = true
+		i = (i + 1) % len(ck.servers)
+		time.Sleep(10 * time.Millisecond)
+	}
 }
